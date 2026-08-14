@@ -1,0 +1,45 @@
+name: Bot CROUS - Vérification logements
+
+on:
+  schedule:
+    # Lance le script toutes les 5 minutes
+    - cron: '*/5 * * * *'
+  workflow_dispatch:  # Permet aussi de lancer manuellement
+
+jobs:
+  check-crous:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Récupérer le code
+        uses: actions/checkout@v4
+
+      - name: Configurer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installer les dépendances
+        run: pip install requests beautifulsoup4
+
+      - name: Récupérer la mémoire (annonces déjà vues)
+        uses: actions/cache@v4
+        with:
+          path: annonces_vues.json
+          key: annonces-cache-${{ github.run_id }}
+          restore-keys: |
+            annonces-cache-
+
+      - name: Lancer le bot CROUS
+        env:
+          EMAIL_EXPEDITEUR: ${{ secrets.EMAIL_EXPEDITEUR }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_DESTINATAIRE: ${{ secrets.EMAIL_DESTINATAIRE }}
+        run: python crous_bot.py
+
+      - name: Sauvegarder la mémoire mise à jour
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: annonces_vues.json
+          key: annonces-cache-${{ github.run_id }}
