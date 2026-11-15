@@ -2,11 +2,12 @@ name: Bot CROUS - Vérification logements
 
 on:
   schedule:
-    # Lance le script toutes les 5 minutes (GitHub peut retarder l'exécution)
+    # Relance le bot toutes les 5 minutes (minimum autorisé par GitHub).
+    # Chaque lancement vérifie ensuite toutes les 30 secondes pendant ~4 min 30.
     - cron: '*/5 * * * *'
   workflow_dispatch:  # Permet aussi de lancer manuellement
 
-# Évite que deux vérifications tournent en même temps et écrasent la mémoire
+# Évite que deux lancements tournent en même temps et écrasent la mémoire
 concurrency:
   group: crous-bot
   cancel-in-progress: false
@@ -14,7 +15,7 @@ concurrency:
 jobs:
   check-crous:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 7
 
     steps:
       - name: Récupérer le code
@@ -29,7 +30,6 @@ jobs:
       - name: Installer les dépendances
         run: pip install -r requirements.txt
 
-      # Restaure la dernière mémoire sauvegardée (sans sauvegarde automatique à la fin)
       - name: Récupérer la mémoire (annonces visibles au dernier passage)
         uses: actions/cache/restore@v4
         with:
@@ -43,6 +43,8 @@ jobs:
           EMAIL_EXPEDITEUR: ${{ secrets.EMAIL_EXPEDITEUR }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_DESTINATAIRE: ${{ secrets.EMAIL_DESTINATAIRE }}
+          # Optionnel : crée un Secret URL_CARTE_CROUS pour ne pas afficher ta zone dans le code
+          URL_CARTE_CROUS: ${{ secrets.URL_CARTE_CROUS }}
         run: python crous_bot.py
 
       # always() : sauvegarde même si le bot a échoué (ex : mail raté)
