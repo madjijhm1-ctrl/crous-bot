@@ -16,6 +16,10 @@ EMAIL_EXPEDITEUR = os.environ.get("EMAIL_EXPEDITEUR", "")
 EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD", "").replace(" ", "")
 EMAIL_DESTINATAIRE = os.environ.get("EMAIL_DESTINATAIRE", "")
 
+# Telegram (optionnel) : alerte instantanée sur le téléphone
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+
 # URL de ta zone. Si le Secret URL_CARTE_CROUS existe, il est utilisé en priorité.
 # Sinon, on prend l'URL ci-dessous.
 URL_PAR_DEFAUT = (
@@ -77,16 +81,25 @@ def sauvegarder_annonces_vues(annonces):
 
 
 # ==========================================
-# MAIL
+# NOTIFICATIONS (mail + Telegram)
 # ==========================================
+def email_configure():
+    return bool(EMAIL_EXPEDITEUR and EMAIL_PASSWORD and EMAIL_DESTINATAIRE)
+
+
+def telegram_configure():
+    return bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
+
+
+def construire_sujet(nb):
+    if nb == 1:
+        return "🚨 CROUS : 1 logement disponible !"
+    return f"🚨 CROUS : {nb} logements disponibles !"
+
+
 def envoyer_email(nouvelles):
     """Envoie UN seul mail listant tous les nouveaux logements. Renvoie True si envoyé."""
     nb = len(nouvelles)
-    sujet = (
-        "🚨 CROUS : 1 logement disponible !"
-        if nb == 1
-        else f"🚨 CROUS : {nb} logements disponibles !"
-    )
 
     lignes = ["Ça bouge sur ta zone CROUS !\n"]
     for lien, titre in nouvelles.items():
@@ -94,7 +107,7 @@ def envoyer_email(nouvelles):
     lignes.append("Connecte-toi vite sur le CROUS pour réserver !")
 
     msg = MIMEText("\n".join(lignes), "plain", "utf-8")
-    msg["Subject"] = sujet
+    msg["Subject"] = construire_sujet(nb)
     msg["From"] = EMAIL_EXPEDITEUR
     msg["To"] = EMAIL_DESTINATAIRE
 
@@ -108,6 +121,44 @@ def envoyer_email(nouvelles):
     except Exception as e:
         print(f"❌ Erreur envoi mail : {e}")
         return False
+
+
+def envoyer_telegram(nouvelles):
+    """Envoie UN seul message Telegram listant les nouveaux logements. Renvoie True si envoyé."""
+    nb = len(nouvelles)
+
+    lignes = [construire_sujet(nb), ""]
+    for lien, titre in nouvelles.items():
+        lignes.append(f"🏠 {titre}\n🔗 {lien}\n")
+    texte = "\n".join(lignes)
+    if len(texte) > 4000:  # limite Telegram : 4096 caractères
+        texte = texte[:3990] + "\n[...]"
+
+    try:
+        response = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": texte},
+            timeout=15,
+        )
+        if response.status_code == 200 and response.json().get("ok"):
+            print(f"📱 Telegram envoyé ({nb} logement(s)).")
+            return True
+        # On n'affiche jamais l'URL (elle contient le token) : seulement la réponse de Telegram
+        print(f"❌ Erreur Telegram {response.status_code} : {response.text[:200]}")
+    except Exception as e:
+        print(f"❌ Erreur Telegram : {type(e).__name__}")
+    return False
+
+
+def notifier(nouvelles):
+    """Envoie sur tous les canaux configurés.
+    Renvoie (au_moins_un_ok, tous_ok)."""
+    resultats = []
+    if telegram_configure():
+        resultats.append(envoyer_telegram(nouvelles))
+    if email_configure():
+        resultats.append(envoyer_email(nouvelles))
+    return any(resultats), all(resultats)
 
 
 # ==========================================
@@ -182,15 +233,22 @@ def recuperer_annonces():
 # PROGRAMME PRINCIPAL
 # ==========================================
 def main():
-    if not (EMAIL_EXPEDITEUR and EMAIL_PASSWORD and EMAIL_DESTINATAIRE):
-        print("❌ Secrets manquants (EMAIL_EXPEDITEUR / EMAIL_PASSWORD / EMAIL_DESTINATAIRE).")
+    if not (email_configure() or telegram_configure()):
+        print("❌ Aucun canal d'alerte configuré : il faut les Secrets du mail "
+              "(EMAIL_EXPEDITEUR / EMAIL_PASSWORD / EMAIL_DESTINATAIRE) "
+              "et/ou ceux de Telegram (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID).")
         return 1
+    if not email_configure():
+        print("ℹ️ Mail non configuré : alertes Telegram uniquement.")
+    if not telegram_configure():
+        print("ℹ️ Telegram non configuré : alertes par mail uniquement.")
 
     vues = charger_annonces_vues()
     debut = time.monotonic()
     nb_ok = 0
     nb_echecs = 0
-    mail_ko = False
+    notif_ko = False      # aucun canal n'a fonctionné : on n'insiste plus pendant ce lancement
+    canal_ko = False      # au moins un canal a échoué : le lancement finira en rouge
     tour = 0
 
     while True:
@@ -206,15 +264,18 @@ def main():
             print(f"📊 {len(annonces)} annonce(s) visible(s) actuellement.")
             nouvelles = {l: t for l, t in annonces.items() if l not in vues}
 
-            if nouvelles and not mail_ko:
+            if nouvelles and not notif_ko:
                 for titre in nouvelles.values():
                     print(f"✨ NOUVEAU : {titre}")
-                if envoyer_email(nouvelles):
+                au_moins_un, tous = notifier(nouvelles)
+                if not tous:
+                    canal_ko = True
+                if au_moins_un:
                     vues = set(annonces)
                 else:
-                    # Mail raté : on ne mémorise pas les nouvelles annonces (nouvel essai au
-                    # prochain lancement) et on n'insiste pas pendant ce lancement.
-                    mail_ko = True
+                    # Aucune alerte envoyée : on ne mémorise pas les nouvelles annonces
+                    # (nouvel essai au prochain lancement) et on n'insiste pas ici.
+                    notif_ko = True
                     vues = vues & set(annonces)
             elif nouvelles:
                 vues = vues & set(annonces)
@@ -233,7 +294,7 @@ def main():
 
     print(f"🏁 Fin : {nb_ok} vérification(s) réussie(s), {nb_echecs} échec(s).")
 
-    if mail_ko:
+    if notif_ko or canal_ko:
         return 1
     if nb_ok == 0:
         return 1
