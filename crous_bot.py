@@ -9,23 +9,31 @@ import requests
 from bs4 import BeautifulSoup
 
 # ==========================================
-# CONFIGURATION — via GitHub Secrets
+# CONFIGURATION — via GitHub Secrets / variables d'environnement
 # ==========================================
 EMAIL_EXPEDITEUR = os.environ.get("EMAIL_EXPEDITEUR", "")
 # Un mot de passe d'application Gmail est affiché avec des espaces : on les retire
 EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD", "").replace(" ", "")
 EMAIL_DESTINATAIRE = os.environ.get("EMAIL_DESTINATAIRE", "")
 
-URL_CARTE_CROUS = (
+# URL de ta zone. Si le Secret URL_CARTE_CROUS existe, il est utilisé en priorité.
+# Sinon, on prend l'URL ci-dessous.
+URL_PAR_DEFAUT = (
     "https://trouverunlogement.lescrous.fr/tools/47/search"
     "?bounds=1.7140057557361257_51.1052465308885_2.481675433470501_50.66251996729595"
 )
+URL_CARTE_CROUS = os.environ.get("URL_CARTE_CROUS", "").strip() or URL_PAR_DEFAUT
 URL_BASE = "https://trouverunlogement.lescrous.fr"
 
 FICHIER_MEMOIRE = "annonces_vues.json"
 
-NB_TENTATIVES = 3          # nombre d'essais si le site ne répond pas
-PAUSE_ENTRE_TENTATIVES = 5  # secondes
+# Le script tourne en boucle pendant DUREE_TOTALE secondes, avec une vérification
+# toutes les INTERVALLE secondes (le workflow le relance toutes les 5 minutes).
+DUREE_TOTALE = int(os.environ.get("DUREE_SECONDES", "270"))
+INTERVALLE = int(os.environ.get("INTERVALLE_SECONDES", "30"))
+
+NB_TENTATIVES = 2           # essais par vérification si le site ne répond pas
+PAUSE_ENTRE_TENTATIVES = 3  # secondes
 
 # Phrases qui indiquent que la page est valide mais qu'il n'y a aucun logement.
 # Si le CROUS affiche une autre phrase, ajoute-la ici.
@@ -103,7 +111,7 @@ def envoyer_email(nouvelles):
 
 
 # ==========================================
-# RÉCUPÉRATION DE LA PAGE
+# RÉCUPÉRATION DES ANNONCES
 # ==========================================
 def telecharger_page():
     """Renvoie le HTML de la page, ou None si le site ne répond pas correctement."""
@@ -152,53 +160,84 @@ def page_indique_aucun_resultat(html):
     return any(phrase in texte for phrase in TEXTES_AUCUN_RESULTAT)
 
 
+def recuperer_annonces():
+    """Renvoie {lien: titre}, ou None si la vérification a échoué."""
+    html = telecharger_page()
+    if html is None:
+        print("❌ Impossible de charger la page CROUS (bloqué ou site en panne ?).")
+        return None
+
+    annonces = extraire_annonces(html)
+
+    # 0 annonce : soit il n'y a vraiment rien, soit le site a changé et le bot est aveugle.
+    if not annonces and not page_indique_aucun_resultat(html):
+        print("❌ Aucune annonce trouvée ET pas de message 'aucun logement' : "
+              "le site a probablement changé de structure.")
+        return None
+
+    return annonces
+
+
 # ==========================================
 # PROGRAMME PRINCIPAL
 # ==========================================
 def main():
-    print("🔍 Vérification CROUS en cours...")
-
     if not (EMAIL_EXPEDITEUR and EMAIL_PASSWORD and EMAIL_DESTINATAIRE):
         print("❌ Secrets manquants (EMAIL_EXPEDITEUR / EMAIL_PASSWORD / EMAIL_DESTINATAIRE).")
         return 1
 
-    html = telecharger_page()
-    if html is None:
-        print("❌ Impossible de charger la page CROUS (bloqué ou site en panne ?).")
-        return 1
-
-    annonces = extraire_annonces(html)
-    print(f"📊 {len(annonces)} annonce(s) visible(s) actuellement.")
-
-    # 0 annonce : soit il n'y a vraiment rien, soit le site a changé et le bot est aveugle.
-    # On ne touche pas à la mémoire dans le doute, et on fait échouer le run.
-    if not annonces and not page_indique_aucun_resultat(html):
-        print("❌ Aucune annonce trouvée ET pas de message 'aucun logement' : "
-              "le site a probablement changé de structure.")
-        return 1
-
     vues = charger_annonces_vues()
-    nouvelles = {lien: titre for lien, titre in annonces.items() if lien not in vues}
+    debut = time.monotonic()
+    nb_ok = 0
+    nb_echecs = 0
+    mail_ko = False
+    tour = 0
 
-    mail_ok = True
-    if nouvelles:
-        for titre in nouvelles.values():
-            print(f"✨ NOUVEAU : {titre}")
-        mail_ok = envoyer_email(nouvelles)
-    else:
-        print("ℹ️ Aucune nouvelle annonce.")
+    while True:
+        tour += 1
+        print(f"🔍 Vérification n°{tour}...")
 
-    # Mémoire = uniquement ce qui est visible MAINTENANT :
-    #  - une annonce qui disparaît puis revient sera de nouveau notifiée ;
-    #  - si le mail a échoué, les nouvelles annonces ne sont pas mémorisées,
-    #    donc le prochain run réessaiera de t'envoyer le mail.
-    if mail_ok:
-        memoire = set(annonces)
-    else:
-        memoire = vues & set(annonces)
-    sauvegarder_annonces_vues(memoire)
+        annonces = recuperer_annonces()
 
-    return 0 if mail_ok else 1
+        if annonces is None:
+            nb_echecs += 1
+        else:
+            nb_ok += 1
+            print(f"📊 {len(annonces)} annonce(s) visible(s) actuellement.")
+            nouvelles = {l: t for l, t in annonces.items() if l not in vues}
+
+            if nouvelles and not mail_ko:
+                for titre in nouvelles.values():
+                    print(f"✨ NOUVEAU : {titre}")
+                if envoyer_email(nouvelles):
+                    vues = set(annonces)
+                else:
+                    # Mail raté : on ne mémorise pas les nouvelles annonces (nouvel essai au
+                    # prochain lancement) et on n'insiste pas pendant ce lancement.
+                    mail_ko = True
+                    vues = vues & set(annonces)
+            elif nouvelles:
+                vues = vues & set(annonces)
+            else:
+                # Mémoire = uniquement ce qui est visible MAINTENANT :
+                # une annonce qui disparaît puis revient sera de nouveau notifiée.
+                vues = set(annonces)
+
+            sauvegarder_annonces_vues(vues)
+
+        # Prochaine vérification, ou fin si le temps imparti est écoulé
+        ecoule = time.monotonic() - debut
+        if ecoule + INTERVALLE > DUREE_TOTALE:
+            break
+        time.sleep(INTERVALLE)
+
+    print(f"🏁 Fin : {nb_ok} vérification(s) réussie(s), {nb_echecs} échec(s).")
+
+    if mail_ko:
+        return 1
+    if nb_ok == 0:
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
