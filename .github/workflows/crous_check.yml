@@ -43,6 +43,9 @@ jobs:
           EMAIL_EXPEDITEUR: ${{ secrets.EMAIL_EXPEDITEUR }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_DESTINATAIRE: ${{ secrets.EMAIL_DESTINATAIRE }}
+          # Alertes Telegram (optionnel)
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           # Optionnel : crée un Secret URL_CARTE_CROUS pour ne pas afficher ta zone dans le code
           URL_CARTE_CROUS: ${{ secrets.URL_CARTE_CROUS }}
         run: python crous_bot.py
